@@ -1,3 +1,4 @@
+#include <cmath>
 #include <iostream>
 #include <string>
 
@@ -17,19 +18,18 @@ static void check(bool cond, const std::string& what) {
     }
 }
 
-// 期望解析出一个字符串，且内容等于 want
-static void expect_string(const std::string& text, const std::string& want) {
+// 期望解析出一个数字，且数值等于 want
+static void expect_number(const std::string& text, double want) {
     try {
         JsonValue v = mini_json::parse(text);
-        check(v.isString() && v.asString() == want,
-              "parse(" + text + ") -> \"" + v.asString() + "\"");
+        const bool ok = v.isNumber() && std::fabs(v.asNumber() - want) < 1e-12;
+        check(ok, "parse(" + text + ") = " + std::to_string(v.asNumber()));
     } catch (const ParseException& e) {
         std::cout << "[FAIL] parse(" << text << ") threw: " << e.what() << "\n";
         ++failures;
     }
 }
 
-// 期望解析失败并抛异常
 static void expect_error(const std::string& text) {
     try {
         mini_json::parse(text);
@@ -43,26 +43,33 @@ static void expect_error(const std::string& text) {
 
 int main() {
     // ---- 正常用例 ----
-    expect_string("\"abc\"", "abc");
-    expect_string("\"\"", "");                      // 空字符串
-    expect_string("\"hello world\"", "hello world"); // 内部允许空格
-    expect_string("  \"  padded  \"  ", "  padded  "); // 前后空白被跳过，内部保留
-    expect_string("\"123\"", "123");                // 数字形态的字符串
-    expect_string("\"中文\"", "中文");               // UTF-8 原样透传
+    expect_number("0", 0);
+    expect_number("-0", 0);          // JSON 允许负零
+    expect_number("42", 42);
+    expect_number("-17", -17);
+    expect_number("3.14", 3.14);
+    expect_number("-1.5e2", -150);   // 科学计数法
+    expect_number("1E+3", 1000);
+    expect_number("1e-2", 0.01);
+    expect_number("2.5e0", 2.5);
 
-    // ---- 上一步的字面量仍然要能解析（回归测试）----
+    // ---- 回归：前面几步的功能不能被弄坏 ----
     check(mini_json::parse("null").isNull(), "null still works");
-    check(mini_json::parse("true").isBool(), "true still works");
-    check(mini_json::parse("false").isBool(), "false still works");
+    check(mini_json::parse("\"abc\"").asString() == "abc", "string still works");
 
-    // ---- 异常用例 ----
-    expect_error("\"abc");        // 没有结束引号
-    expect_error("abc");          // 根本没有引号
-    expect_error("\"a\"\"b\"");   // 尾部多余内容
-    expect_error("\"a\nb\"");     // 字符串内不能出现裸换行（控制字符）
+    // ---- 异常用例：JSON 数字文法比 C 的 strtod 严格得多 ----
+    expect_error("01");      // 前导零
+    expect_error("00");
+    expect_error("-01");
+    expect_error("1.");      // 小数点后必须至少有 1 位
+    expect_error(".5");      // 必须以数字开头
+    expect_error("+1");      // 不允许前导正号
+    expect_error("1e");      // 指数部分缺数字
+    expect_error("1e+");
+    expect_error("-");       // 只有负号
 
     if (failures == 0) {
-        std::cout << "[OK] step 3 passed.\n";
+        std::cout << "[OK] step 4 passed.\n";
         return 0;
     }
     std::cout << failures << " failure(s).\n";
