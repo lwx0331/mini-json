@@ -1,42 +1,70 @@
 #include <iostream>
+#include <string>
+
 #include "json.hpp"
 
 using mini_json::JsonValue;
+using mini_json::ParseException;
 
-static void show(const char* label, const JsonValue& v) {
-    std::cout << label << " -> type: " << v.typeName() << "\n";
+static int failures = 0;
+
+static void check(bool cond, const std::string& what) {
+    if (!cond) {
+        std::cout << "[FAIL] " << what << "\n";
+        ++failures;
+    } else {
+        std::cout << "[ok] " << what << "\n";
+    }
+}
+
+// 期望解析出一个字符串，且内容等于 want
+static void expect_string(const std::string& text, const std::string& want) {
+    try {
+        JsonValue v = mini_json::parse(text);
+        check(v.isString() && v.asString() == want,
+              "parse(" + text + ") -> \"" + v.asString() + "\"");
+    } catch (const ParseException& e) {
+        std::cout << "[FAIL] parse(" << text << ") threw: " << e.what() << "\n";
+        ++failures;
+    }
+}
+
+// 期望解析失败并抛异常
+static void expect_error(const std::string& text) {
+    try {
+        mini_json::parse(text);
+        std::cout << "[FAIL] expected error for " << text << " but none thrown\n";
+        ++failures;
+    } catch (const ParseException& e) {
+        std::cout << "[ok] error for " << text << ": " << e.what()
+                  << " (pos " << e.pos() << ")\n";
+    }
 }
 
 int main() {
-    JsonValue v_null;
-    JsonValue v_bool(true);
-    JsonValue v_num(3.14);
-    JsonValue v_str(std::string("hello"));
+    // ---- 正常用例 ----
+    expect_string("\"abc\"", "abc");
+    expect_string("\"\"", "");                      // 空字符串
+    expect_string("\"hello world\"", "hello world"); // 内部允许空格
+    expect_string("  \"  padded  \"  ", "  padded  "); // 前后空白被跳过，内部保留
+    expect_string("\"123\"", "123");                // 数字形态的字符串
+    expect_string("\"中文\"", "中文");               // UTF-8 原样透传
 
-    mini_json::Array arr;
-    arr.push_back(JsonValue(1.0));
-    arr.push_back(JsonValue(2.0));
-    JsonValue v_array(arr);
+    // ---- 上一步的字面量仍然要能解析（回归测试）----
+    check(mini_json::parse("null").isNull(), "null still works");
+    check(mini_json::parse("true").isBool(), "true still works");
+    check(mini_json::parse("false").isBool(), "false still works");
 
-    mini_json::Object obj;
-    obj["name"] = JsonValue(std::string("mini-json"));
-    obj["star"] = JsonValue(0.0);
-    JsonValue v_object(obj);
+    // ---- 异常用例 ----
+    expect_error("\"abc");        // 没有结束引号
+    expect_error("abc");          // 根本没有引号
+    expect_error("\"a\"\"b\"");   // 尾部多余内容
+    expect_error("\"a\nb\"");     // 字符串内不能出现裸换行（控制字符）
 
-    show("null", v_null);
-    show("true", v_bool);
-    show("3.14", v_num);
-    show("\"hello\"", v_str);
-    show("[1, 2]", v_array);
-    show("{\"name\": ...}", v_object);
-
-    if (!v_null.isNull()) std::cout << "[FAIL] isNull\n";
-    if (!v_bool.isBool()) std::cout << "[FAIL] isBool\n";
-    if (!v_num.isNumber()) std::cout << "[FAIL] isNumber\n";
-    if (!v_str.isString()) std::cout << "[FAIL] isString\n";
-    if (!v_array.isArray()) std::cout << "[FAIL] isArray\n";
-    if (!v_object.isObject()) std::cout << "[FAIL] isObject\n";
-
-    std::cout << "[OK] step 1 passed.\n";
-    return 0;
+    if (failures == 0) {
+        std::cout << "[OK] step 3 passed.\n";
+        return 0;
+    }
+    std::cout << failures << " failure(s).\n";
+    return 1;
 }
