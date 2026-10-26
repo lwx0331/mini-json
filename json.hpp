@@ -343,7 +343,7 @@ namespace mini_json
             }
             return JsonValue(obj);
         }
-        // 读取一个字符串（第 3 步：暂不处理转义序列）
+        // 读取一个字符串（第 7 步：支持转义序列，\u 留到第 8 步）增！！！
         std::string parse_string()
         {
             if (peek() != '"')
@@ -365,6 +365,44 @@ namespace mini_json
                 if (static_cast<unsigned char>(c) < 0x20)
                 {
                     fail("invalid control character in string");
+                }
+
+                if (c == '\\')
+                { // 转义序列
+                    ++pos_;
+                    if (pos_ >= src_.size())
+                        fail("unterminated escape");
+                    switch (src_[pos_])
+                    {
+                    case '"':
+                        out += '"';
+                        break;
+                    case '\\':
+                        out += '\\';
+                        break;
+                    case '/':
+                        out += '/';
+                        break;
+                    case 'b':
+                        out += '\b';
+                        break;
+                    case 'f':
+                        out += '\f';
+                        break;
+                    case 'n':
+                        out += '\n';
+                        break;
+                    case 'r':
+                        out += '\r';
+                        break;
+                    case 't':
+                        out += '\t';
+                        break;
+                    default:
+                        fail("invalid escape sequence(\\u not supported yet)");
+                    }
+                    ++pos_;
+                    continue;
                 }
                 out += c;
                 ++pos_;
