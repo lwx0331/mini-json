@@ -110,9 +110,17 @@ namespace mini_json
         }
 
         // 取值：类型不匹配时抛异常，避免静默返回错误数据
-        double asNumber() const{
-            if(!isNumber()) throw std::runtime_error(" value is not a number ");
+        double asNumber() const
+        {
+            if (!isNumber())
+                throw std::runtime_error(" value is not a number ");
             return num_;
+        }
+        const Array &asArray() const
+        {
+            if (!isArray())
+                throw std::runtime_error("value is not an array");
+            return *arr_;
         }
         const std::string &asString() const
         {
@@ -194,42 +202,94 @@ namespace mini_json
             return result;
         }
 
-        static  bool is_digit(char c){return c >= '0' && c <= '9';}
+        static bool is_digit(char c) { return c >= '0' && c <= '9'; }
 
-        //严格按照JSON文法扫描数字，再交给strtod转成double
-        //文法：-?(0 | [1-09][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
-        JsonValue parse_number(){
+        // 严格按照JSON文法扫描数字，再交给strtod转成double
+        // 文法：-?(0 | [1-09][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
+        JsonValue parse_number()
+        {
+
             const std::size_t start = pos_;
 
-            if(peek() == '-') ++pos_;
-
-            //整数部分:要么单个0,要么1-9开头后跟任意数字
-            if(peek() == '0'){
+            if (peek() == '-')
                 ++pos_;
-                if (is_digit(peek())) fail("invalid number: leading zero");
-            } else if(is_digit(peek())){
-                while(is_digit(peek())) ++pos_;
-            } else{
+
+            // 整数部分:要么单个0,要么1-9开头后跟任意数字
+            if (peek() == '0')
+            {
+                ++pos_;
+                if (is_digit(peek()))
+                    fail("invalid number: leading zero");
+            }
+            else if (is_digit(peek()))
+            {
+                while (is_digit(peek()))
+                    ++pos_;
+            }
+            else
+            {
                 fail("invalid number");
             }
 
-            //小数部分
-            if(peek() == '.'){
+            // 小数部分
+            if (peek() == '.')
+            {
                 ++pos_;
-                if(!is_digit(peek())) fail("invalid number: expected digit after decimal point");
-                while(is_digit(peek())) ++pos_;
+                if (!is_digit(peek()))
+                    fail("invalid number: expected digit after decimal point");
+                while (is_digit(peek()))
+                    ++pos_;
             }
 
-            //指数部分
-            if(peek() == 'e' || peek() == 'E'){
+            // 指数部分
+            if (peek() == 'e' || peek() == 'E')
+            {
                 ++pos_;
-                if(peek() == '+' || peek() == '-') ++pos_;
-                if(!is_digit(peek())) fail("invalid number: expected digit in exponent");
-                while(is_digit(peek())) ++pos_;
+                if (peek() == '+' || peek() == '-')
+                    ++pos_;
+                if (!is_digit(peek()))
+                    fail("invalid number: expected digit in exponent");
+                while (is_digit(peek()))
+                    ++pos_;
             }
 
-            const std::string lexeme =src_.substr(start,pos_-start);
-            return JsonValue(std::strtod(lexeme.c_str(),nullptr));
+            const std::string lexeme = src_.substr(start, pos_ - start);
+            return JsonValue(std::strtod(lexeme.c_str(), nullptr));
+        }
+        // 读取一个数组：[ value (, value)* ]
+        JsonValue parse_array()
+        {
+            if (peek() != '[')
+                fail("expected array");
+            ++pos_; // 跳过 '['
+
+            Array arr;
+            skip_ws();
+            if (peek() == ']')
+            { // 空数组 []
+                ++pos_;
+                return JsonValue(arr);
+            }
+
+            while (true)
+            {
+                skip_ws();
+                arr.push_back(parse_value()); // ← 关键：递归调用，元素可以是任意 JSON 值
+                skip_ws();
+
+                if (peek() == ',')
+                { // 还有下一个元素
+                    ++pos_;
+                    continue;
+                }
+                if (peek() == ']')
+                { // 结束
+                    ++pos_;
+                    break;
+                }
+                fail("expected ',' or ']' in array");
+            }
+            return JsonValue(arr);
         }
         // 读取一个字符串（第 3 步：暂不处理转义序列）
         std::string parse_string()
@@ -273,9 +333,12 @@ namespace mini_json
                 return parse_literal("true", JsonValue(true));
             case 'f':
                 return parse_literal("false", JsonValue(false));
+            case '[':
+                return parse_array();  
             default:
-                if(is_digit(peek()) || peek() == '-') return parse_number();          
-                fail("unsupported value (step 3: null/true/false/string/number)");
+                if (is_digit(peek()) || peek() == '-')
+                    return parse_number();
+                fail("unsupported value (step 5: null/true/false/string/number/array)");
             }
             return JsonValue(); // 不可达，只为消除编译器警告
         }
