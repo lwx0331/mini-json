@@ -116,6 +116,12 @@ namespace mini_json
                 throw std::runtime_error(" value is not a number ");
             return num_;
         }
+        const Object &asObject() const
+        {
+            if (!isObject())
+                throw std::runtime_error("value is not an object");
+            return *obj_;
+        }
         const Array &asArray() const
         {
             if (!isArray())
@@ -291,6 +297,52 @@ namespace mini_json
             }
             return JsonValue(arr);
         }
+        // 读取一个对象：{string:value(,string:value)*}
+        JsonValue parse_object()
+        {
+            if (peek() != '{')
+                fail("expected object");
+            ++pos_; // 跳过'{'
+
+            Object obj;
+            skip_ws();
+            if (peek() == '}')
+            {
+                ++pos_;
+                return JsonValue(obj);
+            }
+
+            while (true)
+            {
+                skip_ws();
+                // 键必须是字符串，JSON不允许{a:1}或{'a':1}
+                if (peek() != '"')
+                    fail("expected string key in object");
+                std::string key = parse_string();
+
+                skip_ws();
+                if (peek() != ':')
+                    fail("expected ':' after object key");
+                ++pos_;
+
+                skip_ws();
+                obj[key] = parse_value(); // 同样递归，值可以是任意 JSON值
+
+                skip_ws();
+                if (peek() == ',')
+                { // 还有下一对
+                    ++pos_;
+                    continue;
+                }
+                if (peek() == '}')
+                { // 结束
+                    ++pos_;
+                    break;
+                }
+                fail("expected  ',' or '}' in object ");
+            }
+            return JsonValue(obj);
+        }
         // 读取一个字符串（第 3 步：暂不处理转义序列）
         std::string parse_string()
         {
@@ -325,6 +377,10 @@ namespace mini_json
         {
             switch (peek())
             {
+            case '{':
+                return parse_object(); // 新增
+            case '[':
+                return parse_array();
             case '"':
                 return JsonValue(parse_string());
             case 'n':
@@ -333,12 +389,11 @@ namespace mini_json
                 return parse_literal("true", JsonValue(true));
             case 'f':
                 return parse_literal("false", JsonValue(false));
-            case '[':
-                return parse_array();  
+
             default:
                 if (is_digit(peek()) || peek() == '-')
                     return parse_number();
-                fail("unsupported value (step 5: null/true/false/string/number/array)");
+                fail("unsupported value ( step 6:all types supported except plain text)");
             }
             return JsonValue(); // 不可达，只为消除编译器警告
         }
