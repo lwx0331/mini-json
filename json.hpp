@@ -140,13 +140,18 @@ inline void append_utf8(std::string& out, unsigned int cp) {
 // ---------- 解析异常：携带出错位置 ----------
 class ParseException : public std::runtime_error {
 public:
-    ParseException(const std::string& msg, std::size_t pos)
-        : std::runtime_error(msg), pos_(pos) {}
+    ParseException(const std::string& msg, std::size_t pos,
+                   std::size_t line, std::size_t col)
+        : std::runtime_error(msg), pos_(pos), line_(line), col_(col) {}
 
     std::size_t pos() const { return pos_; }
+    std::size_t line() const { return line_; }
+    std::size_t col() const { return col_; }
 
 private:
     std::size_t pos_;
+    std::size_t line_;
+    std::size_t col_;
 };
 
 // ---------- 递归下降解析器（第 2 步：只认 null / true / false） ----------
@@ -163,8 +168,18 @@ public:
     }
 
 private:
+    static constexpr std::size_t kMaxDepth = 64;  // 防止恶意输入导致递归爆栈
+
     const std::string& src_;
     std::size_t pos_ = 0;
+    std::size_t depth_ = 0;
+
+    // RAII：进入复合类型时 +1，退出（无论正常返回还是抛异常）自动 -1
+    struct DepthGuard {
+        std::size_t& d;
+        explicit DepthGuard(std::size_t& depth) : d(depth) { ++d; }
+        ~DepthGuard() { --d; }
+    };
 
     char peek() const { return pos_ < src_.size() ? src_[pos_] : '\0'; }
 
@@ -230,6 +245,8 @@ private:
 
     // 读取一个数组：[ value (, value)* ]
     JsonValue parse_array() {
+        DepthGuard guard(depth_);
+        if (depth_ > kMaxDepth) fail("max nesting depth exceeded");
         if (peek() != '[') fail("expected array");
         ++pos_;  // 跳过 '['
 
@@ -260,6 +277,8 @@ private:
 
     // 读取一个对象：{ string : value (, string : value)* }
     JsonValue parse_object() {
+        DepthGuard guard(depth_);
+        if (depth_ > kMaxDepth) fail("max nesting depth exceeded");
         if (peek() != '{') fail("expected object");
         ++pos_;  // 跳过 '{'
 
@@ -371,7 +390,7 @@ private:
                     case '/':  out += '/';  break;
                     case 'b':  out += '\b'; break;
                     case 'f':  out += '\f'; break;
-                case 'n':  out += '\n'; break;
+                    case 'n':  out += '\n'; break;
                     case 'r':  out += '\r'; break;
                     case 't':  out += '\t'; break;
                     case 'u':
@@ -403,8 +422,18 @@ private:
         return JsonValue();  // 不可达，只为消除编译器警告
     }
 
+    // 把线性偏移量换算成「第几行第几列」，让人一眼看出错在哪
     [[noreturn]] void fail(const std::string& msg) {
-        throw ParseException(msg, pos_);
+        std::size_t line = 1, col = 1;
+        for (std::size_t i = 0; i < pos_ && i < src_.size(); ++i) {
+            if (src_[i] == '\n') {
+                ++line;
+                col = 1;
+            } else {
+                ++col;
+            }
+        }
+        throw ParseException(msg, pos_, line, col);
     }
 };
 

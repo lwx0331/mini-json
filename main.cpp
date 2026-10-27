@@ -18,14 +18,17 @@ static void check(bool cond, const std::string& what) {
     }
 }
 
-// 期望解析出一个字符串，且内容逐字节等于 want
-static void expect_string(const std::string& text, const std::string& want) {
+// 期望报错，且行号列号完全对得上
+static void expect_error_at(const std::string& text, std::size_t line,
+                            std::size_t col, const std::string& label) {
     try {
-        JsonValue v = mini_json::parse(text);
-        check(v.isString() && v.asString() == want, "parse(" + text + ")");
-    } catch (const ParseException& e) {
-        std::cout << "[FAIL] parse(" << text << ") threw: " << e.what() << "\n";
+        mini_json::parse(text);
+        std::cout << "[FAIL] " << label << ": no exception thrown\n";
         ++failures;
+    } catch (const ParseException& e) {
+        check(e.line() == line && e.col() == col,
+              label + ": " + e.what() + " (line " + std::to_string(e.line()) +
+                  ", col " + std::to_string(e.col()) + ")");
     }
 }
 
@@ -36,36 +39,48 @@ static void expect_error(const std::string& text) {
         ++failures;
     } catch (const ParseException& e) {
         std::cout << "[ok] error for " << text << ": " << e.what()
-                  << " (pos " << e.pos() << ")\n";
+                  << " (line " << e.line() << ", col " << e.col() << ")\n";
     }
 }
 
 int main() {
-    // ---- BMP 基本区：\uXXXX ----
-    expect_string("\"\\u0041\"", "A");              // 大写字母 A
-    expect_string("\"\\u0042\\u0043\"", "BC");        // 连续两个
-    expect_string("\"a\\u0041b\"", "aAb");           // 与普通字符混排
+    // ---- 单行错误：列号 ----
+    expect_error_at("[1, 2", 1, 6, "数组未闭合");       // 错在最后那个字符之后
+    expect_error_at("{\"a\" 1}", 1, 6, "对象缺冒号");
+    expect_error_at("{\"a\": ,}", 1, 7, "对象缺值");
 
-    // ---- 2 字节 UTF-8（U+0080 ~ U+07FF）----
-    expect_string("\"\\u00e9\"", "\xC3\xA9");         // é
-    expect_string("\"caf\\u00e9\"", "caf\xC3\xA9");  // café
+    // ---- 多行错误：行号 ----
+    expect_error_at("{\n  \"a\": 1,\n  \"b\": ,\n}", 3, 8, "第 3 行的错误");
+    expect_error_at("[\n  1,\n  2\n", 4, 1, "多行数组未闭合");
 
-    // ---- 3 字节 UTF-8（U+0800 ~ U+FFFF）—— 中文就在这里 ----
-    expect_string("\"\\u4e2d\\u6587\"", "\xE4\xB8\xAD\xE6\x96\x87");  // 中文
-    expect_string("\"\\u4f60\\u597d\"", "\xE4\xBD\xA0\xE5\xA5\xBD");  // 你好
+    // ---- 嵌套深度保护 ----
+    {
+        // 60 层：应当正常解析
+        std::string ok60;
+        for (int i = 0; i < 60; ++i) ok60 += "[";
+        for (int i = 0; i < 60; ++i) ok60 += "]";
+        bool parsed = false;
+        try {
+            mini_json::parse(ok60);
+            parsed = true;
+        } catch (const ParseException&) {
+        }
+        check(parsed, "60 层嵌套可以正常解析");
 
-    // ---- 4 字节 UTF-8：必须靠代理对 ----
-    // U+1F600 = 😀，UTF-16 代理对为 D83D DE00
-    expect_string("\"\\ud83d\\ude00\"", "\xF0\x9F\x98\x80");        // 😀
-    expect_string("\"hi \\ud83d\\ude00\"", "hi \xF0\x9F\x98\x80");   // 混排
+        // 500 层：必须被拦住，而不是栈溢出崩溃
+        std::string deep;
+        for (int i = 0; i < 500; ++i) deep += "[";
+        for (int i = 0; i < 500; ++i) deep += "]";
+        bool blocked = false;
+        try {
+            mini_json::parse(deep);
+        } catch (const ParseException& e) {
+            blocked = std::string(e.what()).find("depth") != std::string::npos;
+        }
+        check(blocked, "500 层嵌套被深度保护拦截（不会爆栈）");
+    }
 
-    // ---- 非法 Unicode 转义 ----
-    expect_error("\"\\u00\"");       // 十六进制不足 4 位
-    expect_error("\"\\uZZZZ\"");     // 非十六进制字符
-    expect_error("\"\\ud83d\"");      // 孤立高代理项（后面没有低代理项）
-    expect_error("\"\\ude00\"");      // 孤立低代理项
-
-    // ---- 回归：前面几步的功能不能被弄坏 ----
+    // ---- 回归：前面所有步骤都不能被弄坏 ----
     check(mini_json::parse("null").isNull(), "null still works");
     check(mini_json::parse("\"abc\"").asString() == "abc", "string still works");
     check(std::fabs(mini_json::parse("-1.5e2").asNumber() + 150) < 1e-9,
@@ -74,9 +89,16 @@ int main() {
     check(mini_json::parse("{\"a\": 1}").asObject().at("a").asNumber() == 1,
           "object still works");
     check(mini_json::parse("\"a\\nb\"").asString() == "a\nb", "escape still works");
+    check(mini_json::parse("\"\\ud83d\\ude00\"").asString() == "\xF0\x9F\x98\x80",
+          "unicode escape still works");
+
+    // ---- 其他非法输入仍然报错 ----
+    expect_error("01");
+    expect_error("\"\\x\"");
+    expect_error("{a: 1}");
 
     if (failures == 0) {
-        std::cout << "[OK] step 8 passed.\n";
+        std::cout << "[OK] step 9 passed.\n";
         return 0;
     }
     std::cout << failures << " failure(s).\n";
