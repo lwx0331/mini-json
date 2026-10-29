@@ -18,6 +18,7 @@
 - 嵌套深度保护（默认 64 层），恶意输入不会爆栈
 - 序列化：`dump()` 紧凑输出，`dump(2)` 缩进美化
 - 数字输出使用最短往返表示，`3.14` 不会变成 `3.1400000000000001`
+- **21 个 GoogleTest 单元测试**，覆盖解析、序列化、错误定位与值语义
 
 **不支持（有意为之，保持教学聚焦）**
 
@@ -33,21 +34,16 @@
 依赖：支持 C++17 的编译器（GCC / Clang / MSVC），CMake 可选。
 
 ```bash
-# 方式一：直接编译（推荐，json.hpp 是纯头文件）
+# 方式一：直接编译示例（json.hpp 是纯头文件，零依赖）
 g++ -std=c++17 -O2 -o json_demo main.cpp
 ./json_demo
 
-# 方式二：CMake
+# 方式二：CMake（同时构建示例与单元测试）
 cmake -S . -B build
 cmake --build build
-./build/json_demo
 ```
 
-`main.cpp` 自带一整套测试，全部通过时会输出：
-
-```
-[OK] step 10 passed.
-```
+`main.cpp` 是一套零依赖的手动验证，全部通过时会输出 `[OK] step 10 passed.`。正式单元测试见下面的「测试」章节。
 
 ---
 
@@ -82,6 +78,33 @@ try {
 
 ---
 
+## 测试
+
+项目里有**两套**测试，用途不同：
+
+| 测试 | 位置 | 依赖 | 用途 |
+|---|---|---|---|
+| 手动验证 | `main.cpp` | 无 | 不装任何第三方库也能跑，适合快速自检与演示 |
+| 单元测试 | `tests/test_json.cpp` | GoogleTest | 21 个用例、6 个测试组，适合回归与持续集成 |
+
+单元测试分组：`ScalarParse`（标量）、`ContainerParse`（数组/对象/嵌套）、`StringParse`（转义与 Unicode）、`ErrorReport`（行列号与深度保护）、`Dump`（序列化与往返）、`ValueSemantics`（深拷贝、自赋值、类型错误）。
+
+```bash
+cmake -S . -B build && cmake --build build
+
+./build/json_tests              # 看到 21 个用例逐条 PASSED
+# 或者
+cd build && ctest --output-on-failure
+```
+
+安装 GoogleTest（MSYS2 UCRT64）：
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-gtest
+```
+
+---
+
 ## 设计要点
 
 | 主题 | 做法 | 为什么 |
@@ -100,8 +123,10 @@ try {
 
 ```
 mini-json/
-├── json.hpp          # 全部实现（header-only）
-├── main.cpp          # 测试与示例
+├── json.hpp              # 全部实现（header-only）
+├── main.cpp              # 零依赖手动验证 + 用法示例
+├── tests/
+│   └── test_json.cpp     # GoogleTest 单元测试（21 个用例）
 ├── CMakeLists.txt
 └── README.md
 ```
@@ -132,13 +157,14 @@ mini-json/
 - 内部数字统一为 `double`，解析 `9223372036854775807` 这类大整数会损失精度
 - 对象使用 `std::map`，查找为 O(log n)，且**不保留原始键顺序**（按字典序排列）
 - 未做性能优化，也尚未与 RapidJSON 做基准对比
-- 测试断言是自实现的，尚未接入 GoogleTest
+- 没有 `asBool()` 取值接口，布尔值目前只能用 `dump()` 或 `type()` 判断
 
 ---
 
 ## 下一步
 
-- [ ] 接入 GoogleTest，把现有测试改造成正式单测
+- [x] 接入 GoogleTest，把现有测试改造成正式单测（21 个用例）
+- [ ] 补 `asBool()` 等取值接口
 - [ ] 增加 int64 / uint64 类型分支
 - [ ] 做 benchmark，与 RapidJSON 对比并公开数据
 - [ ] 补充 UTF-16 输入支持
