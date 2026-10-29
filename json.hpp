@@ -3,441 +3,712 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-namespace mini_json {
+namespace mini_json
+{
 
-class JsonValue;
+    class JsonValue;
 
-// 复合类型的容器：数组 = 值列表，对象 = 键值映射
-using Array  = std::vector<JsonValue>;
-using Object = std::map<std::string, JsonValue>;
-
-// JSON 中的一个值。六种类型：null / bool / number / string / array / object
-class JsonValue {
-public:
-    enum class Type { Null, Bool, Number, String, Array, Object };
-
-    // ---------- 6 个构造函数 ----------
-    JsonValue() : type_(Type::Null) {}
-
-    JsonValue(bool b) : type_(Type::Bool), bool_(b) {}
-
-    JsonValue(double d) : type_(Type::Number), num_(d) {}
-
-    JsonValue(const std::string& s) : type_(Type::String), str_(s) {}
-
-    JsonValue(const char* s) : type_(Type::String), str_(s) {}
-
-    JsonValue(const Array& a)
-        : type_(Type::Array), arr_(std::make_unique<Array>(a)) {}
-
-    JsonValue(const Object& o)
-        : type_(Type::Object), obj_(std::make_unique<Object>(o)) {}
-
-    // ---------- 拷贝：复合类型必须深拷贝，否则两个值会共享同一份数据 ----------
-    JsonValue(const JsonValue& other)
-        : type_(other.type_),
-          bool_(other.bool_),
-          num_(other.num_),
-          str_(other.str_),
-          arr_(other.arr_ ? std::make_unique<Array>(*other.arr_) : nullptr),
-          obj_(other.obj_ ? std::make_unique<Object>(*other.obj_) : nullptr) {}
-
-    JsonValue& operator=(const JsonValue& other) {
-        if (this != &other) {
-            JsonValue tmp(other);   // copy-and-swap：先造副本，再交换，异常安全
-            swap(tmp);
-        }
-        return *this;
-    }
-
-    // ---------- 类型查询 ----------
-    Type type() const { return type_; }
-
-    bool isNull() const { return type_ == Type::Null; }
-    bool isBool() const { return type_ == Type::Bool; }
-    bool isNumber() const { return type_ == Type::Number; }
-    bool isString() const { return type_ == Type::String; }
-    bool isArray() const { return type_ == Type::Array; }
-    bool isObject() const { return type_ == Type::Object; }
-
-    void swap(JsonValue& other) noexcept {
-        using std::swap;
-        swap(type_, other.type_);
-        swap(bool_, other.bool_);
-        swap(num_, other.num_);
-        swap(str_, other.str_);
-        swap(arr_, other.arr_);
-        swap(obj_, other.obj_);
-    }
-
-    const char* typeName() const {
-        switch (type_) {
-            case Type::Null: return "null";
-            case Type::Bool: return "bool";
-            case Type::Number: return "number";
-            case Type::String: return "string";
-            case Type::Array: return "array";
-            case Type::Object: return "object";
-        }
-        return "unknown";
-    }
-
-    // 取值：类型不匹配时抛异常，避免静默返回错误数据
-    double asNumber() const {
-        if (!isNumber()) throw std::runtime_error("value is not a number");
-        return num_;
-    }
-
-    const Object& asObject() const {
-        if (!isObject()) throw std::runtime_error("value is not an object");
-        return *obj_;
-    }
-
-    const Array& asArray() const {
-        if (!isArray()) throw std::runtime_error("value is not an array");
-        return *arr_;
-    }
-
-    const std::string& asString() const {
-        if (!isString()) throw std::runtime_error("value is not a string");
-        return str_;
-    }
-
-private:
-    Type type_ = Type::Null;
-    bool bool_ = false;
-    double num_ = 0;
-    std::string str_;
-    std::unique_ptr<Array> arr_;
-    std::unique_ptr<Object> obj_;
-};
-
-// Unicode 码点 → UTF-8 编码（1~4 字节，由码点大小决定）
-inline void append_utf8(std::string& out, unsigned int cp) {
-    if (cp <= 0x7F) {
-        out += static_cast<char>(cp);
-    } else if (cp <= 0x7FF) {
-        out += static_cast<char>(0xC0 | (cp >> 6));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp <= 0xFFFF) {
-        out += static_cast<char>(0xE0 | (cp >> 12));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (cp >> 18));
-        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    }
-}
-
-// ---------- 解析异常：携带出错位置 ----------
-class ParseException : public std::runtime_error {
-public:
-    ParseException(const std::string& msg, std::size_t pos,
-                   std::size_t line, std::size_t col)
-        : std::runtime_error(msg), pos_(pos), line_(line), col_(col) {}
-
-    std::size_t pos() const { return pos_; }
-    std::size_t line() const { return line_; }
-    std::size_t col() const { return col_; }
-
-private:
-    std::size_t pos_;
-    std::size_t line_;
-    std::size_t col_;
-};
-
-// ---------- 递归下降解析器（第 2 步：只认 null / true / false） ----------
-class Parser {
-public:
-    explicit Parser(const std::string& src) : src_(src) {}
-
-    JsonValue parse() {
-        skip_ws();
-        JsonValue v = parse_value();
-        skip_ws();
-        if (pos_ != src_.size()) fail("unexpected trailing content");
-        return v;
-    }
-
-private:
-    static constexpr std::size_t kMaxDepth = 64;  // 防止恶意输入导致递归爆栈
-
-    const std::string& src_;
-    std::size_t pos_ = 0;
-    std::size_t depth_ = 0;
-
-    // RAII：进入复合类型时 +1，退出（无论正常返回还是抛异常）自动 -1
-    struct DepthGuard {
-        std::size_t& d;
-        explicit DepthGuard(std::size_t& depth) : d(depth) { ++d; }
-        ~DepthGuard() { --d; }
-    };
-
-    char peek() const { return pos_ < src_.size() ? src_[pos_] : '\0'; }
-
-    // 跳过 JSON 允许的四种空白符
-    void skip_ws() {
-        while (pos_ < src_.size()) {
-            const char c = src_[pos_];
-            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-                ++pos_;
-            } else {
+    // 复合类型的容器：数组 = 值列表，对象 = 键值映射
+    using Array = std::vector<JsonValue>;
+    using Object = std::map<std::string, JsonValue>;
+    // 序列化：字符串加引号并做转义（与解析端的转义规则一一对应）
+    inline std::string escape_json_string(const std::string &s)
+    {
+        std::string out = "\"";
+        for (unsigned char c : s)
+        {
+            switch (c)
+            {
+            case '"':
+                out += "\\\"";
                 break;
-            }
-        }
-    }
-
-    // 匹配一个字面量（null / true / false），成功则前进并返回对应值
-    JsonValue parse_literal(const char* lit, JsonValue result) {
-        const std::size_t n = std::strlen(lit);
-        if (src_.compare(pos_, n, lit) != 0) {
-            fail(std::string("invalid literal: expected ") + lit);
-        }
-        pos_ += n;
-        return result;
-    }
-
-    static bool is_digit(char c) { return c >= '0' && c <= '9'; }
-
-    // 严格按 JSON 文法扫描数字，再交给 strtod 转成 double
-    // 文法：-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?
-    JsonValue parse_number() {
-        const std::size_t start = pos_;
-
-        if (peek() == '-') ++pos_;
-
-        // 整数部分：要么单个 0，要么 1-9 开头后跟任意位数字
-        if (peek() == '0') {
-            ++pos_;
-            if (is_digit(peek())) fail("invalid number: leading zero");
-        } else if (is_digit(peek())) {
-            while (is_digit(peek())) ++pos_;
-        } else {
-            fail("invalid number");
-        }
-
-        // 小数部分
-        if (peek() == '.') {
-            ++pos_;
-            if (!is_digit(peek())) fail("invalid number: expected digit after decimal point");
-            while (is_digit(peek())) ++pos_;
-        }
-
-        // 指数部分
-        if (peek() == 'e' || peek() == 'E') {
-            ++pos_;
-            if (peek() == '+' || peek() == '-') ++pos_;
-            if (!is_digit(peek())) fail("invalid number: expected digit in exponent");
-            while (is_digit(peek())) ++pos_;
-        }
-
-        const std::string lexeme = src_.substr(start, pos_ - start);
-        return JsonValue(std::strtod(lexeme.c_str(), nullptr));
-    }
-
-    // 读取一个数组：[ value (, value)* ]
-    JsonValue parse_array() {
-        DepthGuard guard(depth_);
-        if (depth_ > kMaxDepth) fail("max nesting depth exceeded");
-        if (peek() != '[') fail("expected array");
-        ++pos_;  // 跳过 '['
-
-        Array arr;
-        skip_ws();
-        if (peek() == ']') {  // 空数组 []
-            ++pos_;
-            return JsonValue(arr);
-        }
-
-        while (true) {
-            skip_ws();
-            arr.push_back(parse_value());   // ← 关键：这里递归调用，数组元素可以是任意 JSON 值
-            skip_ws();
-
-            if (peek() == ',') {  // 还有下一个元素
-                ++pos_;
-                continue;
-            }
-            if (peek() == ']') {  // 结束
-                ++pos_;
+            case '\\':
+                out += "\\\\";
                 break;
-            }
-            fail("expected ',' or ']' in array");
-        }
-        return JsonValue(arr);
-    }
-
-    // 读取一个对象：{ string : value (, string : value)* }
-    JsonValue parse_object() {
-        DepthGuard guard(depth_);
-        if (depth_ > kMaxDepth) fail("max nesting depth exceeded");
-        if (peek() != '{') fail("expected object");
-        ++pos_;  // 跳过 '{'
-
-        Object obj;
-        skip_ws();
-        if (peek() == '}') {  // 空对象 {}
-            ++pos_;
-            return JsonValue(obj);
-        }
-
-        while (true) {
-            skip_ws();
-            // 键必须是字符串，JSON 不允许 {a: 1} 或 {'a': 1}
-            if (peek() != '"') fail("expected string key in object");
-            std::string key = parse_string();
-
-            skip_ws();
-            if (peek() != ':') fail("expected ':' after object key");
-            ++pos_;
-
-            skip_ws();
-            obj[key] = parse_value();   // ← 同样递归，值可以是任意 JSON 值
-
-            skip_ws();
-            if (peek() == ',') {  // 还有下一对
-                ++pos_;
-                continue;
-            }
-            if (peek() == '}') {  // 结束
-                ++pos_;
+            case '\b':
+                out += "\\b";
                 break;
-            }
-            fail("expected ',' or '}' in object");
-        }
-        return JsonValue(obj);
-    }
-
-    // 读取 4 位十六进制数字，失败则抛异常
-    unsigned int parse_hex4() {
-        if (pos_ + 4 > src_.size()) fail("invalid \\u escape");
-        unsigned int val = 0;
-        for (int i = 0; i < 4; ++i) {
-            const char c = src_[pos_ + i];
-            int d;
-            if (c >= '0' && c <= '9') d = c - '0';
-            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-            else fail("invalid \\u escape");
-            val = (val << 4) | static_cast<unsigned int>(d);
-        }
-        pos_ += 4;
-        return val;
-    }
-
-    // 处理 \uXXXX：若是高代理项，必须紧跟一个低代理项组成代理对
-    void parse_u_escape(std::string& out) {
-        const unsigned int cp = parse_hex4();
-
-        if (cp >= 0xD800 && cp <= 0xDBFF) {  // 高代理项
-            if (pos_ + 1 < src_.size() && src_[pos_] == '\\' &&
-                (src_[pos_ + 1] == 'u' || src_[pos_ + 1] == 'U')) {
-                const std::size_t save = pos_;
-                pos_ += 2;
-                const unsigned int lo = parse_hex4();
-                if (lo >= 0xDC00 && lo <= 0xDFFF) {  // 低代理项
-                    const unsigned int full =
-                        0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                    append_utf8(out, full);
-                    return;
+            case '\f':
+                out += "\\f";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            default:
+                if (c < 0x20)
+                { // 其余控制字符写成 \u00XX
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
                 }
-                pos_ = save;
-            }
-            fail("invalid surrogate pair");
-        }
-
-        if (cp >= 0xDC00 && cp <= 0xDFFF) fail("unpaired low surrogate");
-
-        append_utf8(out, cp);
-    }
-
-    // 读取一个字符串（第 7 步：支持转义序列，\\u 留到第 8 步）
-    std::string parse_string() {
-        if (peek() != '"') fail("expected string");
-        ++pos_;  // 跳过开头的引号
-
-        std::string out;
-        while (true) {
-            if (pos_ >= src_.size()) fail("unterminated string");
-            const char c = src_[pos_];
-
-            if (c == '"') {  // 遇到结束引号
-                ++pos_;
-                break;
-            }
-
-            // JSON 规定字符串中不能直接出现 < 0x20 的控制字符
-            if (static_cast<unsigned char>(c) < 0x20) {
-                fail("invalid control character in string");
-            }
-
-            if (c == '\\') {  // 转义序列
-                ++pos_;
-                if (pos_ >= src_.size()) fail("unterminated escape");
-                const char e = src_[pos_];
-                ++pos_;  // 跳过转义字符本身
-                switch (e) {
-                    case '"':  out += '"';  break;
-                    case '\\': out += '\\'; break;
-                    case '/':  out += '/';  break;
-                    case 'b':  out += '\b'; break;
-                    case 'f':  out += '\f'; break;
-                    case 'n':  out += '\n'; break;
-                    case 'r':  out += '\r'; break;
-                    case 't':  out += '\t'; break;
-                    case 'u':
-                    case 'U': parse_u_escape(out); break;   // 内部会吃掉 4 位十六进制
-                    default: fail("invalid escape sequence");
+                else
+                {
+                    out += static_cast<char>(c); // 非 ASCII 原样输出UTF-
                 }
-                continue;
             }
-
-            out += c;
-            ++pos_;
         }
+        out += "\"";
         return out;
     }
 
-    // 看首字符决定解析哪种值 —— 这就是「递归下降」的分派入口
-    JsonValue parse_value() {
-        switch (peek()) {
-            case '{': return parse_object();
-            case '[': return parse_array();
-            case '"': return JsonValue(parse_string());
-            case 'n': return parse_literal("null", JsonValue());
-            case 't': return parse_literal("true", JsonValue(true));
-            case 'f': return parse_literal("false", JsonValue(false));
-            default:
-                if (is_digit(peek()) || peek() == '-') return parse_number();
-                fail("unsupported value (step 6: all types supported except plain text)");
+    // 序列化：整数不带小数点，浮点数用最短往返精度
+    inline std::string format_number(double d)
+    {
+        if (d == static_cast<double>(static_cast<long long>(d)))
+        {
+            return std::to_string(static_cast<long long>(d));
         }
-        return JsonValue();  // 不可达，只为消除编译器警告
+        // 最短往返：从15位精度开始试，哪个能原样转回同一个double就用哪个
+        char buf[64];
+        for (int prec = 15; prec <= 17; ++prec)
+        {
+            std::snprintf(buf, sizeof(buf), "%.*g", prec, d);
+            if (std::strtod(buf, nullptr) == d)
+                return buf;
+        }
+        std::snprintf(buf, sizeof(buf), "%.17g", d);
+        return buf;
     }
 
-    // 把线性偏移量换算成「第几行第几列」，让人一眼看出错在哪
-    [[noreturn]] void fail(const std::string& msg) {
-        std::size_t line = 1, col = 1;
-        for (std::size_t i = 0; i < pos_ && i < src_.size(); ++i) {
-            if (src_[i] == '\n') {
-                ++line;
-                col = 1;
-            } else {
-                ++col;
+    // JSON 中的一个值。六种类型：null / bool / number / string / array / object
+    class JsonValue
+    {
+    public:
+        enum class Type
+        {
+            Null,
+            Bool,
+            Number,
+            String,
+            Array,
+            Object
+        };
+
+        // ---------- 6 个构造函数 ----------
+        JsonValue() : type_(Type::Null) {}
+
+        JsonValue(bool b) : type_(Type::Bool), bool_(b) {}
+
+        JsonValue(double d) : type_(Type::Number), num_(d) {}
+
+        JsonValue(const std::string &s) : type_(Type::String), str_(s) {}
+
+        JsonValue(const char *s) : type_(Type::String), str_(s) {}
+
+        JsonValue(const Array &a)
+            : type_(Type::Array), arr_(std::make_unique<Array>(a)) {}
+
+        JsonValue(const Object &o)
+            : type_(Type::Object), obj_(std::make_unique<Object>(o)) {}
+
+        // ---------- 拷贝：复合类型必须深拷贝，否则两个值会共享同一份数据 ----------
+        JsonValue(const JsonValue &other)
+            : type_(other.type_),
+              bool_(other.bool_),
+              num_(other.num_),
+              str_(other.str_),
+              arr_(other.arr_ ? std::make_unique<Array>(*other.arr_) : nullptr),
+              obj_(other.obj_ ? std::make_unique<Object>(*other.obj_) : nullptr) {}
+
+        JsonValue &operator=(const JsonValue &other)
+        {
+            if (this != &other)
+            {
+                JsonValue tmp(other); // copy-and-swap：先造副本，再交换，异常安全
+                swap(tmp);
+            }
+            return *this;
+        }
+
+        // ---------- 类型查询 ----------
+        Type type() const { return type_; }
+
+        bool isNull() const { return type_ == Type::Null; }
+        bool isBool() const { return type_ == Type::Bool; }
+        bool isNumber() const { return type_ == Type::Number; }
+        bool isString() const { return type_ == Type::String; }
+        bool isArray() const { return type_ == Type::Array; }
+        bool isObject() const { return type_ == Type::Object; }
+
+        void swap(JsonValue &other) noexcept
+        {
+            using std::swap;
+            swap(type_, other.type_);
+            swap(bool_, other.bool_);
+            swap(num_, other.num_);
+            swap(str_, other.str_);
+            swap(arr_, other.arr_);
+            swap(obj_, other.obj_);
+        }
+
+        const char *typeName() const
+        {
+            switch (type_)
+            {
+            case Type::Null:
+                return "null";
+            case Type::Bool:
+                return "bool";
+            case Type::Number:
+                return "number";
+            case Type::String:
+                return "string";
+            case Type::Array:
+                return "array";
+            case Type::Object:
+                return "object";
+            }
+            return "unknown";
+        }
+
+        // 取值：类型不匹配时抛异常，避免静默返回错误数据
+        double asNumber() const
+        {
+            if (!isNumber())
+                throw std::runtime_error("value is not a number");
+            return num_;
+        }
+        // 序列化 indent <= 0输出紧凑格式， >0 按指定空格数缩进美化
+        std::string dump(int indent = 0) const { return dump_impl(indent, 0); }
+
+        const Object &asObject() const
+        {
+            if (!isObject())
+                throw std::runtime_error("value is not an object");
+            return *obj_;
+        }
+
+        const Array &asArray() const
+        {
+            if (!isArray())
+                throw std::runtime_error("value is not an array");
+            return *arr_;
+        }
+
+        const std::string &asString() const
+        {
+            if (!isString())
+                throw std::runtime_error("value is not a string");
+            return str_;
+        }
+
+    private:
+        std::string dump_impl(int indent, int depth) const
+        {
+            switch (type_)
+            {
+            case Type::Null:
+                return "null";
+            case Type::Bool:
+                return bool_ ? "true" : "false";
+            case Type::Number:
+                return format_number(num_);
+            case Type::String:
+                return escape_json_string(str_);
+
+            case Type::Array:
+            {
+                if (!arr_ || arr_->empty())
+                    return "[]";
+                std::string out = "[";
+                for (std::size_t i = 0; i < arr_->size(); ++i)
+                {
+                    if (i > 0)
+                        out += ",";
+                    if (indent > 0)
+                    {
+                        out += "\n";
+                        out.append(static_cast<std::size_t>((depth + 1) * indent), ' ');
+                    }
+                    out += (*arr_)[i].dump_impl(indent, depth + 1);
+                }
+                if (indent > 0)
+                {
+                    out += "\n";
+                    out.append(static_cast<std::size_t>(depth * indent), ' ');
+                }
+                out += "]";
+                return out;
+            }
+
+            case Type::Object:
+            {
+                if (!obj_ || obj_->empty())
+                    return "{}";
+                std::string out = "{";
+                bool first = true;
+                for (const auto &kv : *obj_)
+                {
+                    if (!first)
+                        out += ",";
+                    first = false;
+                    if (indent > 0)
+                    {
+                        out += "\n";
+                        out.append(static_cast<std::size_t>((depth + 1) * indent), ' ');
+                    }
+                    out += escape_json_string(kv.first);
+                    out += (indent > 0) ? ": " : ":";
+                    out += kv.second.dump_impl(indent, depth + 1);
+                }
+                if (indent > 0)
+                {
+                    out += "\n";
+                    out.append(static_cast<std::size_t>(depth * indent), ' ');
+                }
+                out += "}";
+                return out;
+            }
+            }
+            return "";
+        }
+        Type type_ = Type::Null;
+        bool bool_ = false;
+        double num_ = 0;
+        std::string str_;
+        std::unique_ptr<Array> arr_;
+        std::unique_ptr<Object> obj_;
+    };
+
+    // Unicode 码点 → UTF-8 编码（1~4 字节，由码点大小决定）
+    inline void append_utf8(std::string &out, unsigned int cp)
+    {
+        if (cp <= 0x7F)
+        {
+            out += static_cast<char>(cp);
+        }
+        else if (cp <= 0x7FF)
+        {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        else if (cp <= 0xFFFF)
+        {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        else
+        {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    }
+
+    // ---------- 解析异常：携带出错位置 ----------
+    class ParseException : public std::runtime_error
+    {
+    public:
+        ParseException(const std::string &msg, std::size_t pos,
+                       std::size_t line, std::size_t col)
+            : std::runtime_error(msg), pos_(pos), line_(line), col_(col) {}
+
+        std::size_t pos() const { return pos_; }
+        std::size_t line() const { return line_; }
+        std::size_t col() const { return col_; }
+
+    private:
+        std::size_t pos_;
+        std::size_t line_;
+        std::size_t col_;
+    };
+
+    // ---------- 递归下降解析器（第 2 步：只认 null / true / false） ----------
+    class Parser
+    {
+    public:
+        explicit Parser(const std::string &src) : src_(src) {}
+
+        JsonValue parse()
+        {
+            skip_ws();
+            JsonValue v = parse_value();
+            skip_ws();
+            if (pos_ != src_.size())
+                fail("unexpected trailing content");
+            return v;
+        }
+
+    private:
+        static constexpr std::size_t kMaxDepth = 64; // 防止恶意输入导致递归爆栈
+
+        const std::string &src_;
+        std::size_t pos_ = 0;
+        std::size_t depth_ = 0;
+
+        // RAII：进入复合类型时 +1，退出（无论正常返回还是抛异常）自动 -1
+        struct DepthGuard
+        {
+            std::size_t &d;
+            explicit DepthGuard(std::size_t &depth) : d(depth) { ++d; }
+            ~DepthGuard() { --d; }
+        };
+
+        char peek() const { return pos_ < src_.size() ? src_[pos_] : '\0'; }
+
+        // 跳过 JSON 允许的四种空白符
+        void skip_ws()
+        {
+            while (pos_ < src_.size())
+            {
+                const char c = src_[pos_];
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+                {
+                    ++pos_;
+                }
+                else
+                {
+                    break;
+                }
             }
         }
-        throw ParseException(msg, pos_, line, col);
-    }
-};
 
-// 便捷入口
-inline JsonValue parse(const std::string& text) { return Parser(text).parse(); }
+        // 匹配一个字面量（null / true / false），成功则前进并返回对应值
+        JsonValue parse_literal(const char *lit, JsonValue result)
+        {
+            const std::size_t n = std::strlen(lit);
+            if (src_.compare(pos_, n, lit) != 0)
+            {
+                fail(std::string("invalid literal: expected ") + lit);
+            }
+            pos_ += n;
+            return result;
+        }
 
-}  // namespace mini_json
+        static bool is_digit(char c) { return c >= '0' && c <= '9'; }
+
+        // 严格按 JSON 文法扫描数字，再交给 strtod 转成 double
+        // 文法：-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?
+        JsonValue parse_number()
+        {
+            const std::size_t start = pos_;
+
+            if (peek() == '-')
+                ++pos_;
+
+            // 整数部分：要么单个 0，要么 1-9 开头后跟任意位数字
+            if (peek() == '0')
+            {
+                ++pos_;
+                if (is_digit(peek()))
+                    fail("invalid number: leading zero");
+            }
+            else if (is_digit(peek()))
+            {
+                while (is_digit(peek()))
+                    ++pos_;
+            }
+            else
+            {
+                fail("invalid number");
+            }
+
+            // 小数部分
+            if (peek() == '.')
+            {
+                ++pos_;
+                if (!is_digit(peek()))
+                    fail("invalid number: expected digit after decimal point");
+                while (is_digit(peek()))
+                    ++pos_;
+            }
+
+            // 指数部分
+            if (peek() == 'e' || peek() == 'E')
+            {
+                ++pos_;
+                if (peek() == '+' || peek() == '-')
+                    ++pos_;
+                if (!is_digit(peek()))
+                    fail("invalid number: expected digit in exponent");
+                while (is_digit(peek()))
+                    ++pos_;
+            }
+
+            const std::string lexeme = src_.substr(start, pos_ - start);
+            return JsonValue(std::strtod(lexeme.c_str(), nullptr));
+        }
+
+        // 读取一个数组：[ value (, value)* ]
+        JsonValue parse_array()
+        {
+            DepthGuard guard(depth_);
+            if (depth_ > kMaxDepth)
+                fail("max nesting depth exceeded");
+            if (peek() != '[')
+                fail("expected array");
+            ++pos_; // 跳过 '['
+
+            Array arr;
+            skip_ws();
+            if (peek() == ']')
+            { // 空数组 []
+                ++pos_;
+                return JsonValue(arr);
+            }
+
+            while (true)
+            {
+                skip_ws();
+                arr.push_back(parse_value()); // ← 关键：这里递归调用，数组元素可以是任意 JSON 值
+                skip_ws();
+
+                if (peek() == ',')
+                { // 还有下一个元素
+                    ++pos_;
+                    continue;
+                }
+                if (peek() == ']')
+                { // 结束
+                    ++pos_;
+                    break;
+                }
+                fail("expected ',' or ']' in array");
+            }
+            return JsonValue(arr);
+        }
+
+        // 读取一个对象：{ string : value (, string : value)* }
+        JsonValue parse_object()
+        {
+            DepthGuard guard(depth_);
+            if (depth_ > kMaxDepth)
+                fail("max nesting depth exceeded");
+            if (peek() != '{')
+                fail("expected object");
+            ++pos_; // 跳过 '{'
+
+            Object obj;
+            skip_ws();
+            if (peek() == '}')
+            { // 空对象 {}
+                ++pos_;
+                return JsonValue(obj);
+            }
+
+            while (true)
+            {
+                skip_ws();
+                // 键必须是字符串，JSON 不允许 {a: 1} 或 {'a': 1}
+                if (peek() != '"')
+                    fail("expected string key in object");
+                std::string key = parse_string();
+
+                skip_ws();
+                if (peek() != ':')
+                    fail("expected ':' after object key");
+                ++pos_;
+
+                skip_ws();
+                obj[key] = parse_value(); // ← 同样递归，值可以是任意 JSON 值
+
+                skip_ws();
+                if (peek() == ',')
+                { // 还有下一对
+                    ++pos_;
+                    continue;
+                }
+                if (peek() == '}')
+                { // 结束
+                    ++pos_;
+                    break;
+                }
+                fail("expected ',' or '}' in object");
+            }
+            return JsonValue(obj);
+        }
+
+        // 读取 4 位十六进制数字，失败则抛异常
+        unsigned int parse_hex4()
+        {
+            if (pos_ + 4 > src_.size())
+                fail("invalid \\u escape");
+            unsigned int val = 0;
+            for (int i = 0; i < 4; ++i)
+            {
+                const char c = src_[pos_ + i];
+                int d;
+                if (c >= '0' && c <= '9')
+                    d = c - '0';
+                else if (c >= 'a' && c <= 'f')
+                    d = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F')
+                    d = c - 'A' + 10;
+                else
+                    fail("invalid \\u escape");
+                val = (val << 4) | static_cast<unsigned int>(d);
+            }
+            pos_ += 4;
+            return val;
+        }
+
+        // 处理 \uXXXX：若是高代理项，必须紧跟一个低代理项组成代理对
+        void parse_u_escape(std::string &out)
+        {
+            const unsigned int cp = parse_hex4();
+
+            if (cp >= 0xD800 && cp <= 0xDBFF)
+            { // 高代理项
+                if (pos_ + 1 < src_.size() && src_[pos_] == '\\' &&
+                    (src_[pos_ + 1] == 'u' || src_[pos_ + 1] == 'U'))
+                {
+                    const std::size_t save = pos_;
+                    pos_ += 2;
+                    const unsigned int lo = parse_hex4();
+                    if (lo >= 0xDC00 && lo <= 0xDFFF)
+                    { // 低代理项
+                        const unsigned int full =
+                            0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        append_utf8(out, full);
+                        return;
+                    }
+                    pos_ = save;
+                }
+                fail("invalid surrogate pair");
+            }
+
+            if (cp >= 0xDC00 && cp <= 0xDFFF)
+                fail("unpaired low surrogate");
+
+            append_utf8(out, cp);
+        }
+
+        // 读取一个字符串（第 7 步：支持转义序列，\\u 留到第 8 步）
+        std::string parse_string()
+        {
+            if (peek() != '"')
+                fail("expected string");
+            ++pos_; // 跳过开头的引号
+
+            std::string out;
+            while (true)
+            {
+                if (pos_ >= src_.size())
+                    fail("unterminated string");
+                const char c = src_[pos_];
+
+                if (c == '"')
+                { // 遇到结束引号
+                    ++pos_;
+                    break;
+                }
+
+                // JSON 规定字符串中不能直接出现 < 0x20 的控制字符
+                if (static_cast<unsigned char>(c) < 0x20)
+                {
+                    fail("invalid control character in string");
+                }
+
+                if (c == '\\')
+                { // 转义序列
+                    ++pos_;
+                    if (pos_ >= src_.size())
+                        fail("unterminated escape");
+                    const char e = src_[pos_];
+                    ++pos_; // 跳过转义字符本身
+                    switch (e)
+                    {
+                    case '"':
+                        out += '"';
+                        break;
+                    case '\\':
+                        out += '\\';
+                        break;
+                    case '/':
+                        out += '/';
+                        break;
+                    case 'b':
+                        out += '\b';
+                        break;
+                    case 'f':
+                        out += '\f';
+                        break;
+                    case 'n':
+                        out += '\n';
+                        break;
+                    case 'r':
+                        out += '\r';
+                        break;
+                    case 't':
+                        out += '\t';
+                        break;
+                    case 'u':
+                    case 'U':
+                        parse_u_escape(out);
+                        break; // 内部会吃掉 4 位十六进制
+                    default:
+                        fail("invalid escape sequence");
+                    }
+                    continue;
+                }
+
+                out += c;
+                ++pos_;
+            }
+            return out;
+        }
+
+        // 看首字符决定解析哪种值 —— 这就是「递归下降」的分派入口
+        JsonValue parse_value()
+        {
+            switch (peek())
+            {
+            case '{':
+                return parse_object();
+            case '[':
+                return parse_array();
+            case '"':
+                return JsonValue(parse_string());
+            case 'n':
+                return parse_literal("null", JsonValue());
+            case 't':
+                return parse_literal("true", JsonValue(true));
+            case 'f':
+                return parse_literal("false", JsonValue(false));
+            default:
+                if (is_digit(peek()) || peek() == '-')
+                    return parse_number();
+                fail("unsupported value (step 6: all types supported except plain text)");
+            }
+            return JsonValue(); // 不可达，只为消除编译器警告
+        }
+
+        // 把线性偏移量换算成「第几行第几列」，让人一眼看出错在哪
+        [[noreturn]] void fail(const std::string &msg)
+        {
+            std::size_t line = 1, col = 1;
+            for (std::size_t i = 0; i < pos_ && i < src_.size(); ++i)
+            {
+                if (src_[i] == '\n')
+                {
+                    ++line;
+                    col = 1;
+                }
+                else
+                {
+                    ++col;
+                }
+            }
+            throw ParseException(msg, pos_, line, col);
+        }
+    };
+
+    // 便捷入口
+    inline JsonValue parse(const std::string &text) { return Parser(text).parse(); }
+
+} // namespace mini_json

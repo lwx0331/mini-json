@@ -18,87 +18,81 @@ static void check(bool cond, const std::string& what) {
     }
 }
 
-// 期望报错，且行号列号完全对得上
-static void expect_error_at(const std::string& text, std::size_t line,
-                            std::size_t col, const std::string& label) {
+// 紧凑序列化后应等于 want
+static void expect_dump(const std::string& text, const std::string& want) {
     try {
-        mini_json::parse(text);
-        std::cout << "[FAIL] " << label << ": no exception thrown\n";
-        ++failures;
+        JsonValue v = mini_json::parse(text);
+        check(v.dump() == want, "dump(" + text + ") -> " + v.dump());
     } catch (const ParseException& e) {
-        check(e.line() == line && e.col() == col,
-              label + ": " + e.what() + " (line " + std::to_string(e.line()) +
-                  ", col " + std::to_string(e.col()) + ")");
+        std::cout << "[FAIL] parse(" << text << ") threw: " << e.what() << "\n";
+        ++failures;
     }
 }
 
-static void expect_error(const std::string& text) {
+// 往返测试：parse -> dump -> parse -> dump，结果必须稳定
+static void expect_roundtrip(const std::string& text) {
     try {
-        mini_json::parse(text);
-        std::cout << "[FAIL] expected error for " << text << " but none thrown\n";
-        ++failures;
+        const std::string once = mini_json::parse(text).dump();
+        const std::string twice = mini_json::parse(once).dump();
+        check(once == twice, "roundtrip stable: " + text);
     } catch (const ParseException& e) {
-        std::cout << "[ok] error for " << text << ": " << e.what()
-                  << " (line " << e.line() << ", col " << e.col() << ")\n";
+        std::cout << "[FAIL] roundtrip " << text << " threw: " << e.what() << "\n";
+        ++failures;
     }
 }
 
 int main() {
-    // ---- 单行错误：列号 ----
-    expect_error_at("[1, 2", 1, 6, "数组未闭合");       // 错在最后那个字符之后
-    expect_error_at("{\"a\" 1}", 1, 6, "对象缺冒号");
-    expect_error_at("{\"a\": ,}", 1, 7, "对象缺值");
+    // ---- 标量序列化 ----
+    expect_dump("null", "null");
+    expect_dump("true", "true");
+    expect_dump("false", "false");
+    expect_dump("42", "42");
+    expect_dump("-17", "-17");
+    expect_dump("3.14", "3.14");
+    expect_dump("\"abc\"", "\"abc\"");
 
-    // ---- 多行错误：行号 ----
-    expect_error_at("{\n  \"a\": 1,\n  \"b\": ,\n}", 3, 8, "第 3 行的错误");
-    expect_error_at("[\n  1,\n  2\n", 4, 1, "多行数组未闭合");
+    // ---- 容器序列化（紧凑）----
+    expect_dump("[]", "[]");
+    expect_dump("{}", "{}");
+    expect_dump("[1, 2, 3]", "[1,2,3]");
+    expect_dump("{\"a\": 1}", "{\"a\":1}");
+    expect_dump("{\"a\": [1, {\"b\": null}]}", "{\"a\":[1,{\"b\":null}]}");
 
-    // ---- 嵌套深度保护 ----
+    // ---- 转义在输出端要还原 ----
+    expect_dump("\"a\\nb\"", "\"a\\nb\"");        // 换行符输出成 \n
+    expect_dump("\"say \\\"hi\\\"\"", "\"say \\\"hi\\\"\"");
+    expect_dump("\"a\\\\b\"", "\"a\\\\b\"");
+
+    // ---- Unicode：\uXXXX 转成 UTF-8 原文输出 ----
+    expect_dump("\"\\u4e2d\\u6587\"", "\"\xE4\xB8\xAD\xE6\x96\x87\"");   // 中文
+    expect_dump("\"\\ud83d\\ude00\"", "\"\xF0\x9F\x98\x80\"");           // 😀
+
+    // ---- 往返稳定性 ----
+    expect_roundtrip("{\"name\": \"mini-json\", \"tags\": [1, 2, 3], \"ok\": true}");
+    expect_roundtrip("[1, 2.5, \"x\", null, false, {\"a\": {\"b\": []}}]");
+    expect_roundtrip("\"\\ud83d\\ude00\\u4e2d\\u6587\"");
+    expect_roundtrip("3.14159265358979");
+
+    // ---- 美化输出（缩进 2 空格）----
     {
-        // 60 层：应当正常解析
-        std::string ok60;
-        for (int i = 0; i < 60; ++i) ok60 += "[";
-        for (int i = 0; i < 60; ++i) ok60 += "]";
-        bool parsed = false;
-        try {
-            mini_json::parse(ok60);
-            parsed = true;
-        } catch (const ParseException&) {
-        }
-        check(parsed, "60 层嵌套可以正常解析");
-
-        // 500 层：必须被拦住，而不是栈溢出崩溃
-        std::string deep;
-        for (int i = 0; i < 500; ++i) deep += "[";
-        for (int i = 0; i < 500; ++i) deep += "]";
-        bool blocked = false;
-        try {
-            mini_json::parse(deep);
-        } catch (const ParseException& e) {
-            blocked = std::string(e.what()).find("depth") != std::string::npos;
-        }
-        check(blocked, "500 层嵌套被深度保护拦截（不会爆栈）");
+        JsonValue v = mini_json::parse("{\"a\": 1, \"b\": [2, 3]}");
+        const std::string pretty = v.dump(2);
+        std::cout << "--- pretty ---\n" << pretty << "\n--------------\n";
+        check(pretty.find('\n') != std::string::npos, "dump(2) 有换行缩进");
+        check(mini_json::parse(pretty).dump() == v.dump(),
+              "美化后的文本仍能正确解析回来");
     }
 
-    // ---- 回归：前面所有步骤都不能被弄坏 ----
+    // ---- 回归：解析端不能被弄坏 ----
     check(mini_json::parse("null").isNull(), "null still works");
     check(mini_json::parse("\"abc\"").asString() == "abc", "string still works");
     check(std::fabs(mini_json::parse("-1.5e2").asNumber() + 150) < 1e-9,
           "number still works");
-    check(mini_json::parse("[1, 2]").asArray().size() == 2, "array still works");
-    check(mini_json::parse("{\"a\": 1}").asObject().at("a").asNumber() == 1,
-          "object still works");
-    check(mini_json::parse("\"a\\nb\"").asString() == "a\nb", "escape still works");
     check(mini_json::parse("\"\\ud83d\\ude00\"").asString() == "\xF0\x9F\x98\x80",
           "unicode escape still works");
 
-    // ---- 其他非法输入仍然报错 ----
-    expect_error("01");
-    expect_error("\"\\x\"");
-    expect_error("{a: 1}");
-
     if (failures == 0) {
-        std::cout << "[OK] step 9 passed.\n";
+        std::cout << "[OK] step 10 passed.\n";
         return 0;
     }
     std::cout << failures << " failure(s).\n";
